@@ -14,7 +14,9 @@ from sqlalchemy.exc import IntegrityError, OperationalError
 import service
 from db import (Base, DeviceModel, FirmwareFormat, ProgramFormat, PublishLog,
                 SessionLocal, engine)
+from disclosure import DisclosureError
 from examples import EXAMPLES
+from schema_spec import parse_schema
 
 BASE_DIR = Path(__file__).resolve().parent
 templates = Jinja2Templates(directory=str(BASE_DIR / "templates"))
@@ -69,10 +71,25 @@ def _model_context(name: str, result=None):
         logs = s.execute(select(PublishLog).where(PublishLog.model_id == model.id)
                          .order_by(PublishLog.id.desc()).limit(50)).scalars().all()
         s.expunge_all()
+        # 每个固件版本：各分支字段并集（保持首次出现顺序），供选列页渲染勾选框
+        fw_fields = []
+        for f in firmwares:
+            schema = parse_schema(f.doc)
+            ordered = []
+            seen = set()
+            for b in schema.branches:
+                for name in b.properties:
+                    if name not in seen:
+                        seen.add(name)
+                        ordered.append(name)
+            fw_fields.append({"version": f.version, "fields": ordered,
+                              "schema_json": json.dumps(f.doc, ensure_ascii=False)})
         return {
             "model": model, "firmwares": firmwares, "programs": programs,
             "logs": logs, "examples": EXAMPLES, "result": result,
             "max_formats": service.MAX_FORMATS,
+            "fw_fields": fw_fields, "review": None, "review_error": None,
+            "review_form": None,
         }
 
 
@@ -141,6 +158,25 @@ def prog_publish_html(request: Request, name: str,
                                       _model_context(name, result=outcome))
 
 
+@app.post("/models/{name}/disclosure", response_class=HTMLResponse)
+def disclosure_html(request: Request, name: str, version: str = Form(...),
+                    site_field: str = Form(...),
+                    public_fields: list[str] = Form(default=[])):
+    model = _get_model_or_404(name)
+    form = {"version": version, "site_field": (site_field or "").strip(),
+            "public_fields": list(public_fields)}
+    ctx = _model_context(name)
+    ctx["review_form"] = form
+    try:
+        review = service.review_disclosure(
+            model.id, version, (site_field or "").strip(), list(public_fields))
+    except DisclosureError as e:
+        ctx["review_error"] = str(e)
+    else:
+        ctx["review"] = review
+    return templates.TemplateResponse(request, "model.html", ctx)
+
+
 # ---------------- JSON API ----------------
 
 class ModelIn(BaseModel):
@@ -156,6 +192,12 @@ class ProgramIn(BaseModel):
     model_config = ConfigDict(populate_by_name=True)
     program_id: str
     doc: dict = Field(alias="schema")
+
+
+class DisclosureIn(BaseModel):
+    version: int
+    site_field: str
+    public_fields: list[str] = []
 
 
 def _outcome_response(outcome: service.PublishOutcome, extra=None):
@@ -222,3 +264,30 @@ def api_publish_program(name: str, body: ProgramIn):
     model = _get_model_or_404(name)
     outcome = service.publish_program(model.id, body.program_id.strip(), body.doc)
     return _outcome_response(outcome)
+
+
+@app.post("/api/models/{name}/disclosure")
+def api_disclosure(name: str, body: DisclosureIn):
+    """选列暴露复核。
+
+    status=pass 通过；status=risk 给见证公开报文与唯一站号；
+    status=unknown 为待核（求解器未能完成判定）；请求不合法返回 422。
+    """
+    model = _get_model_or_404(name)
+    try:
+        review = service.review_disclosure(
+            model.id, body.version, body.site_field.strip(), body.public_fields)
+    except DisclosureError as e:
+        return JSONResponse({"ok": False, "status": "invalid", "message": str(e)},
+                            status_code=422)
+    return {
+        "ok": True,
+        "status": review.status,
+        "message": review.message,
+        "firmware_version": review.firmware_version,
+        "site_field": review.site_field,
+        "public_fields": review.public_fields,
+        "stations": review.stations,
+        "witness": review.witness,
+        "witness_site": review.witness_site,
+    }

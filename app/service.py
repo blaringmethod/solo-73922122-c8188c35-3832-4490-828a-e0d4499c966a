@@ -9,6 +9,7 @@ from sqlalchemy import select, update
 
 from db import (DeviceModel, FirmwareFormat, ProgramFormat, PublishLog,
                 SessionLocal)
+from disclosure import DisclosureError, check_disclosure
 from schema_spec import SchemaError, parse_schema
 from solver import check_compatibility
 
@@ -140,3 +141,26 @@ def publish_program(model_id: int, program_id: str, raw_doc) -> PublishOutcome:
                          detail={"checked_pairs": len(fw_pairs) * len(prog_pairs)}))
         s.commit()
         return PublishOutcome(True, f"程序「{program_id}」读取格式已发布")
+
+
+def review_disclosure(model_id: int, version, site_field: str, public_fields: list):
+    """选列暴露复核：针对某已发布固件版本，判定删站号后公开字段是否仍暴露采样站。
+
+    只读操作（不写库、不加锁）；返回 DisclosureResult；请求不合法抛 DisclosureError。
+    """
+    try:
+        version = int(version)
+    except (TypeError, ValueError):
+        raise DisclosureError("固件版本号必须是整数")
+    with SessionLocal() as s:
+        fw = s.execute(
+            select(FirmwareFormat).where(FirmwareFormat.model_id == model_id,
+                                         FirmwareFormat.version == version)
+        ).scalar_one_or_none()
+        if fw is None:
+            raise DisclosureError(f"固件写入格式 v{version} 不存在，请先在型号页选择已发布版本")
+        doc = fw.doc
+    schema = parse_schema(doc)
+    result = check_disclosure(schema, site_field, list(public_fields))
+    result.firmware_version = version
+    return result

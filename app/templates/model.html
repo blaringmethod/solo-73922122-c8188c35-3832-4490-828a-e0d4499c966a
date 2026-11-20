@@ -46,6 +46,131 @@
   </div>
 </div>
 
+<h2>公开选列 · 站号暴露复核</h2>
+<div class="card">
+  <p class="muted">
+    对外分享水质明细前，先选一个<b>已发布的固件写入契约版本</b>和<b>站号字段</b>，再勾选站号之外拟公开的字段。
+    系统按契约的全部合法报文做全量判定（z3 证明，非抽样）：仅当每一种可能的公开报文都能由
+    <b>至少两个不同站号</b>的合法原报文裁剪得到，才判通过；缺省字段与显式 <code>null</code> 区别保留；
+    顶层 anyOf 按全部合法报文判定。求解器未能完成时显示<b>待核</b>。
+  </p>
+  {% if not firmwares %}
+  <p class="err">请先发布至少一版固件写入格式，再进行选列复核。</p>
+  {% else %}
+  <form method="post" action="/models/{{ model.name }}/disclosure">
+    <p>
+      固件版本：
+      <select id="disc_version" name="version">
+        {% for fw in fw_fields %}
+        <option value="{{ fw.version }}"
+          {% if review_form and review_form.version | string == fw.version | string %}selected{% endif %}>
+          v{{ fw.version }}
+        </option>
+        {% endfor %}
+      </select>
+      &nbsp;&nbsp;站号字段：
+      <select id="disc_site" name="site_field"></select>
+    </p>
+    <p class="muted">拟公开字段（不含站号；可全不选，表示公开空报文）：</p>
+    <div id="disc_fields" class="pickgrid"></div>
+    <p style="margin-top:10px"><button type="submit">全量判定选列是否暴露站号</button></p>
+  </form>
+
+  <script type="application/json" id="fw-field-data">{{ fw_fields | tojson | safe }}</script>
+  <script>
+  const FW_FIELDS = JSON.parse(document.getElementById('fw-field-data').textContent);
+  const PICK_FORM = {{ review_form | tojson | safe if review_form else 'null' }};
+
+  function currentFw() {
+    const v = document.getElementById('disc_version').value;
+    return FW_FIELDS.find(x => String(x.version) === String(v));
+  }
+
+  function rebuildPickers() {
+    const fw = currentFw();
+    const siteSel = document.getElementById('disc_site');
+    const box = document.getElementById('disc_fields');
+    siteSel.innerHTML = '';
+    box.innerHTML = '';
+    fw.fields.forEach(function (f) {
+      const o = document.createElement('option');
+      o.value = f; o.textContent = f;
+      siteSel.appendChild(o);
+    });
+    rebuildPublicBox();
+    if (PICK_FORM && String(PICK_FORM.version) === String(fw.version)) {
+      if (fw.fields.indexOf(PICK_FORM.site_field) >= 0) siteSel.value = PICK_FORM.site_field;
+      rebuildPublicBox();
+      PICK_FORM.public_fields.forEach(function (name) {
+        const cb = box.querySelector('input[value="' + name.replace(/"/g, '\\"') + '"]');
+        if (cb) cb.checked = true;
+      });
+    }
+  }
+
+  function rebuildPublicBox() {
+    const fw = currentFw();
+    const site = document.getElementById('disc_site').value;
+    const box = document.getElementById('disc_fields');
+    const kept = Array.from(box.querySelectorAll('input:checked')).map(c => c.value);
+    box.innerHTML = '';
+    fw.fields.filter(f => f !== site).forEach(function (f) {
+      const label = document.createElement('label');
+      label.className = 'pickitem';
+      const cb = document.createElement('input');
+      cb.type = 'checkbox'; cb.name = 'public_fields'; cb.value = f;
+      if (kept.indexOf(f) >= 0) cb.checked = true;
+      label.appendChild(cb);
+      label.appendChild(document.createTextNode(' ' + f));
+      box.appendChild(label);
+    });
+    if (!box.children.length) {
+      box.innerHTML = '<span class="muted">该版本除站号字段外没有其他字段。</span>';
+    }
+  }
+
+  document.getElementById('disc_version').addEventListener('change', rebuildPickers);
+  document.getElementById('disc_site').addEventListener('change', rebuildPublicBox);
+  rebuildPickers();
+  </script>
+  {% endif %}
+
+  {% if review_error %}
+  <div class="card notice-bad">
+    <h3>✘ 复核请求无效</h3>
+    <p>{{ review_error }}</p>
+  </div>
+  {% endif %}
+  {% if review %}
+    {% if review.status == 'pass' %}
+    <div class="card notice-ok">
+      <h3>✔ 选列通过</h3>
+      <p>{{ review.message }}</p>
+      <p class="muted">固件 v{{ review.firmware_version }}；站号字段 <code>{{ review.site_field }}</code>；
+        公开字段：{{ review.public_fields | join('、') if review.public_fields else '（空）' }}</p>
+    </div>
+    {% elif review.status == 'risk' %}
+    <div class="card notice-bad">
+      <h3>✘ 选列不通过：公开报文会暴露采样站</h3>
+      <p>{{ review.message }}</p>
+      <p>固件 v{{ review.firmware_version }}；站号字段 <code>{{ review.site_field }}</code>；
+        公开字段：{{ review.public_fields | join('、') if review.public_fields else '（空）' }}</p>
+      <div class="card cex">
+        只能由站号 <b>「{{ review.witness_site }}」</b>产生的公开报文（改选字段后可复查）：
+        <pre>{{ review.witness | tojson }}</pre>
+      </div>
+    </div>
+    {% else %}
+    <div class="card notice-pending">
+      <h3>⏳ 待核</h3>
+      <p>{{ review.message }}</p>
+      <p class="muted">固件 v{{ review.firmware_version }}；站号字段 <code>{{ review.site_field }}</code>；
+        公开字段：{{ review.public_fields | join('、') if review.public_fields else '（空）' }}</p>
+    </div>
+    {% endif %}
+  {% endif %}
+</div>
+
 <h2>发布新格式</h2>
 <div class="cols">
   <div class="card">

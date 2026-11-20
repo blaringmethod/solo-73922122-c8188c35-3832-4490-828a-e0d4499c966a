@@ -97,6 +97,45 @@ ANYOF_PROG = {
     ]
 }
 
+# ---- 示例四：选列暴露复核 ----
+# 安全契约：两站指标取值域完全一致，删掉站号后任何公开组合都能来自两个站。
+DISCLOSE_SAFE_FW = {
+    "type": "object",
+    "properties": {
+        "site": {"type": "string", "enum": ["WQ-01", "WQ-02"]},
+        "temp": {"type": "integer", "minimum": -40, "maximum": 100},
+        "ph": {"type": "integer", "minimum": 0, "maximum": 14},
+        "qc": {"enum": ["N", "Q", None]},
+    },
+    "required": ["site", "temp"],
+    "additionalProperties": False,
+}
+
+# 风险契约（顶层 anyOf）：两站报文形态不同——WQ-01 发温度、WQ-02 发水位档位。
+# 只公开 temp 或 level 之一即可反推站号；两字段都不选（空公开报文）则通过。
+DISCLOSE_RISK_FW = {
+    "anyOf": [
+        {
+            "type": "object",
+            "properties": {
+                "site": {"type": "string", "enum": ["WQ-01"]},
+                "temp": {"type": "integer", "minimum": -40, "maximum": 100},
+            },
+            "required": ["site", "temp"],
+            "additionalProperties": False,
+        },
+        {
+            "type": "object",
+            "properties": {
+                "site": {"type": "string", "enum": ["WQ-02"]},
+                "level": {"type": "integer", "enum": [0, 1, 2, 3]},
+            },
+            "required": ["site", "level"],
+            "additionalProperties": False,
+        },
+    ]
+}
+
 EXAMPLES = [
     {
         "title": "示例一：温度扩范围",
@@ -139,6 +178,24 @@ EXAMPLES = [
         "snippets": [
             {"label": "程序 multiplexer：anyOf 两种报文", "target": "program",
              "program_id": "multiplexer", "doc": ANYOF_PROG},
+        ],
+    },
+    {
+        "title": "示例四：选列暴露复核（删站号后是否仍暴露采样站）",
+        "story": ("在型号页「公开选列·站号暴露复核」选固件版本与站号字段 site，再勾选拟公开字段。"
+                  "安全契约两站取值域一致，公开 temp/ph 后每种报文都能来自两个站 → 通过；"
+                  "风险契约用 anyOf 让两站报文形态不同（WQ-01 发 temp、WQ-02 发 level），"
+                  "勾选任一字段都会拿到只能来自唯一站号的见证报文 → 不通过，改选后可复查。"),
+        "steps": [
+            "发布「安全契约」固件，选站号 site、公开 temp → 判定通过",
+            "发布「风险契约」固件，选站号 site、公开 temp → 不通过并给出见证报文与站号 WQ-01",
+            "在风险契约上改选 level → 见证站号变为 WQ-02；全部不勾选（空公开报文）→ 通过",
+        ],
+        "snippets": [
+            {"label": "固件：选列安全契约（两站同域）", "target": "firmware",
+             "doc": DISCLOSE_SAFE_FW},
+            {"label": "固件：选列风险契约（anyOf 两站异形）", "target": "firmware",
+             "doc": DISCLOSE_RISK_FW},
         ],
     },
 ]

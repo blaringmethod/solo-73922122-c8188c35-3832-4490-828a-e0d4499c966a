@@ -77,6 +77,21 @@ class _Encoder:
         return Or(*[self.branch_ok(b) for b in schema.branches])
 
 
+def decode_message(model, enc: "_Encoder", fields, str_tables) -> dict:
+    """从 z3 模型还原报文；缺省字段不出现，显式 null 还原为 None（两者保留区别）。"""
+    msg = {}
+    for f in fields:
+        if is_true(model.eval(enc.present[f], model_completion=True)):
+            k = model.eval(enc.kind[f], model_completion=True).as_long()
+            if k == KIND_NULL:
+                msg[f] = None
+            elif k == KIND_INT:
+                msg[f] = model.eval(enc.ival[f], model_completion=True).as_long()
+            else:
+                msg[f] = str_tables[f][model.eval(enc.sval[f], model_completion=True).as_long()]
+    return msg
+
+
 def find_counterexample(write: Schema, read: Schema):
     """若存在被 read 拒收的 write 合法报文，返回该报文 dict；否则返回 None。"""
     names = set()
@@ -108,16 +123,7 @@ def find_counterexample(write: Schema, read: Schema):
         return None
 
     m = s.model()
-    msg = {}
-    for f in fields:
-        if is_true(m.eval(enc.present[f], model_completion=True)):
-            k = m.eval(enc.kind[f], model_completion=True).as_long()
-            if k == KIND_NULL:
-                msg[f] = None
-            elif k == KIND_INT:
-                msg[f] = m.eval(enc.ival[f], model_completion=True).as_long()
-            else:
-                msg[f] = str_tables[f][m.eval(enc.sval[f], model_completion=True).as_long()]
+    msg = decode_message(m, enc, fields, str_tables)
     # 复核：反例必须确实满足写入格式、且确实被读取格式拒收
     if not message_valid(msg, write) or message_valid(msg, read):
         raise RuntimeError(f"内部错误：z3 反例复核失败 {msg!r}")

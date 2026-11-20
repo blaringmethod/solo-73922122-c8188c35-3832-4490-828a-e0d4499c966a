@@ -90,6 +90,93 @@ def main():
     r = pub_fw(temp_doc(-40, 100, qc=["N", "Q", None]))
     ok("固件v3(qc可缺省)发布", r.status_code == 200 and r.json()["version"] == 3, r.text)
 
+    # ---- 选列暴露复核 ----
+    print("选列暴露复核")
+    dm = f"d{uuid.uuid4().hex[:10]}"
+    assert c.post("/api/models", json={"name": dm}).status_code == 201
+    safe_doc = {
+        "type": "object",
+        "properties": {
+            "site": {"type": "string", "enum": ["WQ-01", "WQ-02"]},
+            "temp": {"type": "integer", "minimum": -40, "maximum": 100},
+            "ph": {"type": "integer", "minimum": 0, "maximum": 14},
+            "qc": {"enum": ["N", "Q", None]},
+        },
+        "required": ["site", "temp"], "additionalProperties": False}
+    risk_doc = {"anyOf": [
+        {"type": "object",
+         "properties": {"site": {"type": "string", "enum": ["WQ-01"]},
+                        "temp": {"type": "integer", "minimum": -40, "maximum": 100}},
+         "required": ["site", "temp"], "additionalProperties": False},
+        {"type": "object",
+         "properties": {"site": {"type": "string", "enum": ["WQ-02"]},
+                        "level": {"type": "integer", "enum": [0, 1, 2, 3]}},
+         "required": ["site", "level"], "additionalProperties": False}]}
+    assert c.post(f"/api/models/{dm}/firmware", json={"schema": safe_doc}).status_code == 200
+    assert c.post(f"/api/models/{dm}/firmware", json={"schema": risk_doc}).status_code == 200
+
+    r = c.post(f"/api/models/{dm}/disclosure",
+               json={"version": 1, "site_field": "site", "public_fields": ["temp", "ph"]})
+    body = r.json()
+    ok("选列:安全契约通过", r.status_code == 200 and body["status"] == "pass"
+       and body["witness"] is None and len(body["stations"]) == 2, r.text)
+
+    r = c.post(f"/api/models/{dm}/disclosure",
+               json={"version": 2, "site_field": "site", "public_fields": ["temp"]})
+    body = r.json()
+    ok("选列:风险契约暴露且给见证", r.status_code == 200 and body["status"] == "risk"
+       and body["witness_site"] == "WQ-01" and "temp" in body["witness"], r.text)
+    r = c.post(f"/api/models/{dm}/disclosure",
+               json={"version": 2, "site_field": "site", "public_fields": ["level"]})
+    ok("选列:改选level见证WQ-02", r.json()["status"] == "risk"
+       and r.json()["witness_site"] == "WQ-02", r.text)
+    r = c.post(f"/api/models/{dm}/disclosure",
+               json={"version": 2, "site_field": "site", "public_fields": []})
+    ok("选列:空公开字段通过", r.json()["status"] == "pass", r.text)
+
+    # 缺省与显式 null 区别：显式 null 只 WQ-01 可产生
+    null_doc = {"anyOf": [
+        {"type": "object",
+         "properties": {"site": {"type": "string", "enum": ["WQ-01"]},
+                        "qc": {"enum": ["N", None]}},
+         "required": ["site"], "additionalProperties": False},
+        {"type": "object",
+         "properties": {"site": {"type": "string", "enum": ["WQ-02"]},
+                        "qc": {"enum": ["N"]}},
+         "required": ["site"], "additionalProperties": False}]}
+    assert c.post(f"/api/models/{dm}/firmware", json={"schema": null_doc}).status_code == 200
+    r = c.post(f"/api/models/{dm}/disclosure",
+               json={"version": 3, "site_field": "site", "public_fields": ["qc"]})
+    body = r.json()
+    ok("选列:显式null暴露且见证保留null", body["status"] == "risk"
+       and body["witness"] == {"qc": None} and body["witness_site"] == "WQ-01", r.text)
+
+    # 非法请求 422
+    for bad in [
+        {"version": 1, "site_field": "nope", "public_fields": ["temp"]},
+        {"version": 1, "site_field": "site", "public_fields": ["site"]},
+        {"version": 9, "site_field": "site", "public_fields": ["temp"]},
+        {"version": 1, "site_field": "site", "public_fields": ["nope"]},
+    ]:
+        r = c.post(f"/api/models/{dm}/disclosure", json=bad)
+        ok(f"选列:非法请求422({bad['site_field']}/{bad['public_fields']})",
+           r.status_code == 422 and r.json()["status"] == "invalid", r.text)
+
+    # HTML 表单：型号页含复核卡片，提交后展示对应结论
+    r = c.get(f"/models/{dm}")
+    ok("选列:型号页含复核卡片", r.status_code == 200 and "站号暴露复核" in r.text
+       and "公开选列" in r.text, r.text)
+    r = c.post(f"/models/{dm}/disclosure",
+               data={"version": "2", "site_field": "site", "public_fields": ["temp"]})
+    ok("选列:HTML表单展示风险与见证", r.status_code == 200 and "选列不通过" in r.text
+       and "WQ-01" in r.text, r.text)
+    r = c.post(f"/models/{dm}/disclosure",
+               data={"version": "1", "site_field": "site", "public_fields": ["temp"]})
+    ok("选列:HTML表单展示通过", r.status_code == 200 and "选列通过" in r.text, r.text)
+    r = c.post(f"/models/{dm}/disclosure",
+               data={"version": "9", "site_field": "site", "public_fields": ["temp"]})
+    ok("选列:HTML表单展示无效原因", r.status_code == 200 and "复核请求无效" in r.text, r.text)
+
     # ---- 非法语法拒绝 ----
     print("非法语法")
     bad_docs = [
